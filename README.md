@@ -44,7 +44,23 @@ You must be in a voice channel to use a command — the same one as the bot if i
 
 ## Running in Docker
 
-The image works on `linux/amd64` and `linux/arm64` — including a Raspberry Pi 3/4/5, as long as it runs a **64-bit OS** (the native voice libraries have no 32-bit ARM build). Inside the container, ffmpeg and yt-dlp are installed as Linux system tools; the `.exe` bundling only happens on Windows.
+The image is available for `linux/amd64` and `linux/arm64` (64-bit ARM build only — the native voice libraries ship no 32-bit ARM build). Inside the container, ffmpeg and yt-dlp are installed as Linux system tools; the `.exe` bundling only happens on Windows.
+
+### Using the prebuilt package
+
+Every push to `master` publishes a multi-arch image to GitHub Container Registry as [`ghcr.io/lluancarlo/discordbot`](https://ghcr.io/lluancarlo/discordbot):
+
+```
+docker pull ghcr.io/lluancarlo/discordbot:latest
+docker run -d --name discordbot \
+  -e DISCORD_TOKEN=your_bot_token \
+  --restart unless-stopped \
+  ghcr.io/lluancarlo/discordbot:latest
+```
+
+Docker picks the right architecture (amd64/arm64) automatically. To use your own intro sounds (played when the bot joins a voice channel) without rebuilding the image, mount a folder with audio files over the bundled one: `-v /path/to/intro:/app/intro`. The folder is scanned once at startup.
+
+### Building the image yourself
 
 ```
 docker build -t discordbot .
