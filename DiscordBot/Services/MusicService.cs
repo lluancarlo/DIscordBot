@@ -20,6 +20,8 @@ public sealed class MusicService(
     ILoggerFactory loggerFactory) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<ulong, GuildPlayer> _players = new();
+    private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _aloneTimers = new();
+    private readonly ILogger _logger = loggerFactory.CreateLogger<MusicService>();
 
     /// <summary>Queues a link, connecting to the caller's voice channel when needed.</summary>
     public async Task<PlayResult> PlayAsync(SocketGuildUser user, string link, CancellationToken ct)
@@ -139,6 +141,82 @@ public sealed class MusicService(
         return new QuitResult.Left();
     }
 
+    /// <summary>
+    /// Reacts to users joining or leaving voice channels: when the bot ends up alone in its
+    /// channel a countdown starts, and unless someone comes back in time it leaves like /quit.
+    /// Wired to <see cref="DiscordSocketClient.UserVoiceStateUpdated"/>.
+    /// </summary>
+    public Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState before, SocketVoiceState after)
+    {
+        // Mute/deafen toggles fire this event too; only channel changes matter here.
+        if (before.VoiceChannel?.Id == after.VoiceChannel?.Id)
+            return Task.CompletedTask;
+
+        var guilds = new[] { before.VoiceChannel?.Guild, after.VoiceChannel?.Guild }
+            .OfType<SocketGuild>()
+            .DistinctBy(g => g.Id);
+
+        foreach (var guild in guilds)
+            UpdateAloneTimer(guild);
+
+        return Task.CompletedTask;
+    }
+
+    private void UpdateAloneTimer(SocketGuild guild)
+    {
+        var timeout = TimeSpan.FromSeconds(options.Value.AloneTimeoutSeconds);
+        if (timeout <= TimeSpan.Zero)
+            return;
+
+        if (!IsAlone(guild))
+        {
+            if (_aloneTimers.TryRemove(guild.Id, out var armed))
+            {
+                armed.Cancel();
+                armed.Dispose();
+            }
+
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        if (!_aloneTimers.TryAdd(guild.Id, cts))
+        {
+            // A countdown is already running for this guild.
+            cts.Dispose();
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(timeout, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            // Whoever removes the entry disposes it; losing the race means a voice event is
+            // cancelling this very timer right now.
+            if (_aloneTimers.TryRemove(new KeyValuePair<ulong, CancellationTokenSource>(guild.Id, cts)))
+                cts.Dispose();
+
+            // The event that would clear the timer may have been missed; check again.
+            if (!IsAlone(guild))
+                return;
+
+            _logger.LogInformation(
+                "Guild {GuildId}: alone in the voice channel for {Timeout}, leaving", guild.Id, timeout);
+            await QuitAsync(guild);
+        });
+    }
+
+    /// <summary>True when the bot sits in a voice channel with no human (non-bot) users.</summary>
+    private static bool IsAlone(SocketGuild guild) =>
+        guild.CurrentUser.VoiceChannel is { } channel && channel.ConnectedUsers.All(u => u.IsBot);
+
     /// <summary>Tracks waiting behind the current one, oldest first.</summary>
     public IReadOnlyList<TrackInfo> GetQueue(ulong guildId) => FindPlayer(guildId)?.Queue ?? [];
 
@@ -176,7 +254,7 @@ public sealed class MusicService(
             id,
             downloader,
             introService,
-            TimeSpan.FromSeconds(options.Value.ChannelTimeoutSeconds),
+            TimeSpan.FromSeconds(options.Value.IdleTimeoutSeconds),
             loggerFactory.CreateLogger<GuildPlayer>()));
 
     private GuildPlayer? FindPlayer(ulong guildId) =>
@@ -191,6 +269,14 @@ public sealed class MusicService(
 
     public async ValueTask DisposeAsync()
     {
+        foreach (var timer in _aloneTimers.Values)
+        {
+            timer.Cancel();
+            timer.Dispose();
+        }
+
+        _aloneTimers.Clear();
+
         foreach (var player in _players.Values)
             await player.DisposeAsync();
 

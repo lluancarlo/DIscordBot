@@ -39,6 +39,13 @@ public sealed class DiscordBotService(
         client.Ready += () => { _ = Task.Run(OnReadyAsync); return Task.CompletedTask; };
         client.JoinedGuild += guild => { _ = Task.Run(() => registry.RegisterAsync(guild)); return Task.CompletedTask; };
         client.SlashCommandExecuted += registry.Dispatch;
+        // Detects the bot being left alone in a voice channel; runs off the gateway task because
+        // leaving waits for the playback loop to unwind.
+        client.UserVoiceStateUpdated += (user, before, after) =>
+        {
+            _ = Task.Run(() => music.HandleVoiceStateUpdatedAsync(user, before, after));
+            return Task.CompletedTask;
+        };
 
         await client.LoginAsync(TokenType.Bot, token);
         await client.StartAsync();

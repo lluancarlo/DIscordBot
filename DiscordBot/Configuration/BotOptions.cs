@@ -17,8 +17,15 @@ public sealed class BotOptions
     public ulong GuildId { get; set; }
 
     /// <summary>
-    /// How long the bot may stay connected to a voice channel, in seconds, before it leaves
-    /// automatically. 0 disables the timeout.
+    /// How long the bot waits in the voice channel for a new /play, in seconds, after the last
+    /// track finished and the queue is empty. When nothing is queued in time it leaves. 0 makes
+    /// it stay until /quit or the alone timeout kicks in.
     /// </summary>
-    public int ChannelTimeoutSeconds { get; set; }
+    public int IdleTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// How long the bot may be alone (no non-bot users) in a voice channel, in seconds, before it
+    /// disconnects automatically, like /quit. 0 disables the check.
+    /// </summary>
+    public int AloneTimeoutSeconds { get; set; } = 10;
 }

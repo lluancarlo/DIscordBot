@@ -14,7 +14,7 @@ internal sealed class GuildPlayer(
     ulong guildId,
     YoutubeDownloader downloader,
     IntroService introService,
-    TimeSpan channelTimeout,
+    TimeSpan idleTimeout,
     ILogger logger) : IAsyncDisposable
 {
     private const int BufferMilliseconds = 1000;
@@ -27,7 +27,7 @@ internal sealed class GuildPlayer(
     private IAudioClient? _audioClient;
     private ulong _voiceChannelId;
     private string? _pendingIntro;
-    private CancellationTokenSource? _timeoutCts;
+    private CancellationTokenSource? _idleCts;
     private CancellationTokenSource? _playbackCts;
     private Task _playbackLoop = Task.CompletedTask;
     private bool _loopRunning;
@@ -84,6 +84,7 @@ internal sealed class GuildPlayer(
             }
 
             _queue.Enqueue(new QueuedTrack(track, download));
+            CancelIdleTimeout();
             var position = _queue.Count - (IsPlaying ? 0 : 1);
 
             if (!_loopRunning)
@@ -196,45 +197,52 @@ internal sealed class GuildPlayer(
 
         _voiceChannelId = channel.Id;
         _pendingIntro = introService.PickRandomIntro();
-        StartChannelTimeout();
     }
 
     /// <summary>
-    /// Arms the auto-leave timer. It counts from the moment the bot joins the channel and is
-    /// disarmed again by <see cref="DisconnectAsync"/>, so reconnecting restarts the clock.
+    /// Arms the idle timer after the queue ran dry: the bot stays in the channel waiting for a
+    /// new /play, and leaves when none arrives in time. Enqueueing disarms it.
     /// </summary>
-    private void StartChannelTimeout()
+    private void StartIdleTimeout()
     {
-        CancelChannelTimeout();
+        CancelIdleTimeout();
 
-        if (channelTimeout <= TimeSpan.Zero)
+        if (idleTimeout <= TimeSpan.Zero)
             return;
 
         var cts = new CancellationTokenSource();
-        _timeoutCts = cts;
+        _idleCts = cts;
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(channelTimeout, cts.Token);
+                await Task.Delay(idleTimeout, cts.Token);
             }
             catch (OperationCanceledException)
             {
                 return;
             }
 
+            // A /play may have slipped in right as the delay expired; leaving would kill it.
+            await _sync.WaitAsync();
+            var stillIdle = _queue.Count == 0 && !IsPlaying;
+            _sync.Release();
+
+            if (!stillIdle)
+                return;
+
             logger.LogInformation(
-                "Guild {GuildId}: connected for more than {Timeout}, leaving the voice channel",
-                guildId, channelTimeout);
+                "Guild {GuildId}: no new track for {Timeout}, leaving the voice channel",
+                guildId, idleTimeout);
             await StopAsync();
         });
     }
 
-    private void CancelChannelTimeout()
+    private void CancelIdleTimeout()
     {
-        var cts = _timeoutCts;
-        _timeoutCts = null;
+        var cts = _idleCts;
+        _idleCts = null;
 
         if (cts is null)
             return;
@@ -245,7 +253,7 @@ internal sealed class GuildPlayer(
 
     private async Task DisconnectAsync()
     {
-        CancelChannelTimeout();
+        CancelIdleTimeout();
 
         if (_audioClient is null)
             return;
@@ -279,10 +287,12 @@ internal sealed class GuildPlayer(
                 {
                     if (!_queue.TryDequeue(out queued))
                     {
-                        // Nothing left to play. Leaving the channel and clearing the running flag
-                        // happens under the lock so a /play racing with this cannot be lost.
+                        // Nothing left to play. The bot stays in the channel waiting for a new
+                        // /play; the idle timer makes it leave when none arrives. Arming it and
+                        // clearing the running flag happen under the lock so a /play racing with
+                        // this cannot be lost.
                         CurrentTrack = null;
-                        await DisconnectAsync();
+                        StartIdleTimeout();
                         _loopRunning = false;
                         return;
                     }
