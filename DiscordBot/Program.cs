@@ -27,6 +27,7 @@ builder.Services.AddSingleton<DiscordSocketClient>();
 
 // Business logic.
 builder.Services.AddSingleton<YoutubeDownloader>();
+builder.Services.AddSingleton<IntroService>();
 builder.Services.AddSingleton<MusicService>();
 
 // Slash commands: add a file under Commands/ and one line here.

@@ -45,6 +45,8 @@
   <ItemGroup>
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Intro sounds: any audio file in intro/ makes the bot play a random one on channel join. -->
+    <None Include="intro\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!--

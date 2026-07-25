@@ -10,7 +10,12 @@ namespace DiscordBot.Services;
 /// background loop that streams the current track into Discord.
 /// Only <see cref="MusicService"/> talks to this; commands go through that facade.
 /// </summary>
-internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, TimeSpan channelTimeout, ILogger logger) : IAsyncDisposable
+internal sealed class GuildPlayer(
+    ulong guildId,
+    YoutubeDownloader downloader,
+    IntroService introService,
+    TimeSpan channelTimeout,
+    ILogger logger) : IAsyncDisposable
 {
     private const int BufferMilliseconds = 1000;
     private const int ReadBufferSize = 3840 * 4; // a few 20 ms Opus frames of 48 kHz stereo PCM
@@ -21,6 +26,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
 
     private IAudioClient? _audioClient;
     private ulong _voiceChannelId;
+    private string? _pendingIntro;
     private CancellationTokenSource? _timeoutCts;
     private CancellationTokenSource? _playbackCts;
     private Task _playbackLoop = Task.CompletedTask;
@@ -189,6 +195,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         }
 
         _voiceChannelId = channel.Id;
+        _pendingIntro = introService.PickRandomIntro();
         StartChannelTimeout();
     }
 
@@ -322,13 +329,50 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
     private async Task PlayTrackAsync(QueuedTrack queued, CancellationToken ct)
     {
         var track = queued.Track;
-        var file = await queued.Download.WaitAsync(ct);
 
         var audioClient = _audioClient
                           ?? throw new InvalidOperationException("Not connected to a voice channel.");
 
-        logger.LogInformation("Guild {GuildId}: now playing '{Title}'", guildId, track.Title);
+        // Playing the intro first also buys time for the track download, which runs concurrently.
+        await PlayPendingIntroAsync(audioClient, ct);
 
+        var file = await queued.Download.WaitAsync(ct);
+
+        logger.LogInformation("Guild {GuildId}: now playing '{Title}'", guildId, track.Title);
+        await StreamFileAsync(audioClient, file, ct);
+    }
+
+    /// <summary>
+    /// Plays the intro queued up by the last voice connect, when there is one. An intro that fails
+    /// only logs: it must never take the requested track down with it.
+    /// </summary>
+    private async Task PlayPendingIntroAsync(IAudioClient audioClient, CancellationToken ct)
+    {
+        var intro = _pendingIntro;
+        _pendingIntro = null;
+
+        if (intro is null)
+            return;
+
+        logger.LogInformation("Guild {GuildId}: playing intro '{Intro}'", guildId, Path.GetFileName(intro));
+
+        try
+        {
+            await StreamFileAsync(audioClient, intro, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Guild {GuildId}: intro playback failed", guildId);
+        }
+    }
+
+    /// <summary>Decodes a local audio file with ffmpeg and streams it into the voice channel.</summary>
+    private async Task StreamFileAsync(IAudioClient audioClient, string file, CancellationToken ct)
+    {
         using var ffmpeg = FfmpegPcmStream.Open(file);
         await using var discord = audioClient.CreatePCMStream(AudioApplication.Music, bufferMillis: BufferMilliseconds);
 

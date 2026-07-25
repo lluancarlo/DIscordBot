@@ -15,6 +15,7 @@ namespace DiscordBot.Services;
 /// </summary>
 public sealed class MusicService(
     YoutubeDownloader downloader,
+    IntroService introService,
     IOptions<BotOptions> options,
     ILoggerFactory loggerFactory) : IAsyncDisposable
 {
@@ -174,6 +175,7 @@ public sealed class MusicService(
         _players.GetOrAdd(guildId, id => new GuildPlayer(
             id,
             downloader,
+            introService,
             TimeSpan.FromSeconds(options.Value.ChannelTimeoutSeconds),
             loggerFactory.CreateLogger<GuildPlayer>()));
 
