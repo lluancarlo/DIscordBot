@@ -17,7 +17,7 @@ public sealed class PlayCommand(MusicService music) : ISlashCommand
     public SlashCommandProperties Build() => new SlashCommandBuilder()
         .WithName(Name)
         .WithDescription("Play a YouTube link, or add it to the queue when something is already playing")
-        .AddOption(LinkOption, ApplicationCommandOptionType.String, "YouTube video link", isRequired: true)
+        .AddOption(LinkOption, ApplicationCommandOptionType.String, "YouTube or YouTube Music link", isRequired: true)
         .Build();
 
     public async Task ExecuteAsync(CommandContext context)
@@ -31,7 +31,16 @@ public sealed class PlayCommand(MusicService music) : ISlashCommand
         // Reading the video and downloading it takes longer than Discord's three second window.
         await context.DeferAsync();
 
-        var result = await music.PlayAsync(user, context.GetString(LinkOption), CancellationToken.None);
+        PlayResult result;
+        try
+        {
+            result = await music.PlayAsync(user, context.GetString(LinkOption), CancellationToken.None);
+        }
+        catch (TimeoutException)
+        {
+            await context.ErrorAsync("Could not join the voice channel — please try again.");
+            return;
+        }
 
         switch (result)
         {

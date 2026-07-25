@@ -154,11 +154,26 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         if (_audioClient is { ConnectionState: ConnectionState.Connected } && _voiceChannelId == channel.Id)
             return;
 
-        if (_audioClient is not null)
-            await _audioClient.StopAsync();
+        // A half-dead client left behind by a dropped voice session makes the next connect time
+        // out, so tear it down completely before joining again.
+        await DisconnectAsync();
 
         logger.LogInformation("Guild {GuildId}: connecting to voice channel {Channel}", guildId, channel.Name);
-        _audioClient = await channel.ConnectAsync();
+
+        try
+        {
+            // Self-deafen: the bot never uses incoming audio, and receiving it costs real CPU
+            // (per-speaker decryption) on small hosts like a Raspberry Pi.
+            _audioClient = await channel.ConnectAsync(selfDeaf: true);
+        }
+        catch (TimeoutException)
+        {
+            logger.LogWarning("Guild {GuildId}: voice connect timed out, retrying once", guildId);
+            await DisconnectAsync();
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            _audioClient = await channel.ConnectAsync(selfDeaf: true);
+        }
+
         _voiceChannelId = channel.Id;
         StartChannelTimeout();
     }
