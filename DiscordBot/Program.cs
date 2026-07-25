@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Discord;
 using Discord.WebSocket;
 using DiscordBot.Bot;
@@ -7,7 +8,20 @@ using DiscordBot.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
-var builder = Host.CreateApplicationBuilder(args);
+// Visual Studio launches (F5 sets a debugger, Ctrl+F5 inherits VS's environment variables) don't
+// set DOTNET_ENVIRONMENT, so detect them and switch to Development, which makes
+// appsettings.Development.json (with the real token) load. An explicit DOTNET_ENVIRONMENT wins.
+var environmentName =
+    Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") is null &&
+    (Debugger.IsAttached || Environment.GetEnvironmentVariable("VisualStudioVersion") is not null)
+        ? Environments.Development
+        : null;
+
+var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+{
+    Args = args,
+    EnvironmentName = environmentName
+});
 
 builder.Services.Configure<BotOptions>(builder.Configuration.GetSection(BotOptions.SectionName));
 
