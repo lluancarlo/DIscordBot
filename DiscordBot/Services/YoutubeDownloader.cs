@@ -12,6 +12,10 @@ namespace DiscordBot.Services;
 /// </summary>
 public sealed class YoutubeDownloader(ILogger<YoutubeDownloader> logger)
 {
+    // Queued tracks prefetch their audio as soon as they are enqueued; one download at a time
+    // keeps a burst of /play commands from starving the audio encoder on small hosts.
+    private readonly SemaphoreSlim _downloadGate = new(1, 1);
+
     /// <summary>Reads title/duration/thumbnail without downloading anything.</summary>
     public async Task<TrackInfo?> GetTrackInfoAsync(string url, string requestedBy, CancellationToken ct)
     {
@@ -55,37 +59,48 @@ public sealed class YoutubeDownloader(ILogger<YoutubeDownloader> logger)
     {
         Directory.CreateDirectory(BundledTools.CacheDirectory);
 
-        var cached = Directory
-            .EnumerateFiles(BundledTools.CacheDirectory, track.Id + ".*")
-            .FirstOrDefault(f => !f.EndsWith(".part", StringComparison.OrdinalIgnoreCase));
-
-        if (cached is not null)
+        if (FindCached(track.Id) is { } cached)
         {
             logger.LogInformation("Using cached audio for {Title}", track.Title);
             return cached;
         }
 
-        var template = Path.Combine(BundledTools.CacheDirectory, "%(id)s.%(ext)s");
-        logger.LogInformation("Downloading audio for {Title}", track.Title);
+        await _downloadGate.WaitAsync(ct);
+        try
+        {
+            // The same track may have been queued twice and downloaded while we waited.
+            if (FindCached(track.Id) is { } nowCached)
+                return nowCached;
 
-        var (exitCode, _, stderr) = await RunAsync(
-        [
-            "--no-playlist",
-            "--no-warnings",
-            "--no-part",
-            "--format", "bestaudio[ext=m4a]/bestaudio/best",
-            "--output", template,
-            track.Url
-        ], ct);
+            var template = Path.Combine(BundledTools.CacheDirectory, "%(id)s.%(ext)s");
+            logger.LogInformation("Downloading audio for {Title}", track.Title);
 
-        if (exitCode != 0)
-            throw new InvalidOperationException($"yt-dlp failed to download '{track.Title}': {stderr}");
+            var (exitCode, _, stderr) = await RunAsync(
+            [
+                "--no-playlist",
+                "--no-warnings",
+                "--no-part",
+                "--format", "bestaudio[ext=m4a]/bestaudio/best",
+                "--output", template,
+                track.Url
+            ], ct);
 
-        var file = Directory.EnumerateFiles(BundledTools.CacheDirectory, track.Id + ".*").FirstOrDefault()
+            if (exitCode != 0)
+                throw new InvalidOperationException($"yt-dlp failed to download '{track.Title}': {stderr}");
+
+            return Directory.EnumerateFiles(BundledTools.CacheDirectory, track.Id + ".*").FirstOrDefault()
                    ?? throw new InvalidOperationException($"yt-dlp reported success but no file was written for '{track.Title}'.");
-
-        return file;
+        }
+        finally
+        {
+            _downloadGate.Release();
+        }
     }
+
+    private static string? FindCached(string id) =>
+        Directory
+            .EnumerateFiles(BundledTools.CacheDirectory, id + ".*")
+            .FirstOrDefault(f => !f.EndsWith(".part", StringComparison.OrdinalIgnoreCase));
 
     private static async Task<(int ExitCode, string StdOut, string StdErr)> RunAsync(
         IEnumerable<string> arguments, CancellationToken ct)

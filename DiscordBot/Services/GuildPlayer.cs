@@ -17,7 +17,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
 
     private readonly SemaphoreSlim _sync = new(1, 1);
     private readonly SemaphoreSlim _pauseGate = new(1, 1);
-    private readonly Queue<TrackInfo> _queue = new();
+    private readonly Queue<QueuedTrack> _queue = new();
 
     private IAudioClient? _audioClient;
     private ulong _voiceChannelId;
@@ -39,7 +39,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
             _sync.Wait();
             try
             {
-                return [.. _queue];
+                return [.. _queue.Select(q => q.Track)];
             }
             finally
             {
@@ -57,16 +57,32 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         await _sync.WaitAsync();
         try
         {
-            await ConnectAsync(channel);
+            // Replaced instead of disposed: a download dropped by an earlier failed connect may
+            // still hold the old token.
+            if (!_loopRunning)
+                _playbackCts = new CancellationTokenSource();
 
-            _queue.Enqueue(track);
+            // Start the download right away so it overlaps the voice connect and whatever is
+            // playing ahead of it; by its turn the file is usually already cached.
+            var download = downloader.DownloadAudioAsync(track, _playbackCts!.Token);
+
+            try
+            {
+                await ConnectAsync(channel);
+            }
+            catch
+            {
+                // The track is not queued, but the download keeps warming the cache for a retry.
+                Observe(download);
+                throw;
+            }
+
+            _queue.Enqueue(new QueuedTrack(track, download));
             var position = _queue.Count - (IsPlaying ? 0 : 1);
 
             if (!_loopRunning)
             {
                 _loopRunning = true;
-                _playbackCts?.Dispose();
-                _playbackCts = new CancellationTokenSource();
                 _playbackLoop = Task.Run(() => RunPlaybackLoopAsync(_playbackCts.Token));
             }
 
@@ -111,9 +127,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         await _sync.WaitAsync();
         try
         {
-            var removed = _queue.Count;
-            _queue.Clear();
-            return removed;
+            return DrainQueueLocked();
         }
         finally
         {
@@ -129,7 +143,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         await _sync.WaitAsync();
         try
         {
-            _queue.Clear();
+            DrainQueueLocked();
 
             if (IsPaused)
             {
@@ -251,12 +265,12 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         {
             while (!ct.IsCancellationRequested)
             {
-                TrackInfo? track;
+                QueuedTrack? queued;
 
                 await _sync.WaitAsync(ct);
                 try
                 {
-                    if (!_queue.TryDequeue(out track))
+                    if (!_queue.TryDequeue(out queued))
                     {
                         // Nothing left to play. Leaving the channel and clearing the running flag
                         // happens under the lock so a /play racing with this cannot be lost.
@@ -266,7 +280,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
                         return;
                     }
 
-                    CurrentTrack = track;
+                    CurrentTrack = queued.Track;
                 }
                 finally
                 {
@@ -275,7 +289,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
 
                 try
                 {
-                    await PlayTrackAsync(track, ct);
+                    await PlayTrackAsync(queued, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -283,7 +297,7 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "Guild {GuildId}: playback of '{Title}' failed, skipping", guildId, track.Title);
+                    logger.LogError(ex, "Guild {GuildId}: playback of '{Title}' failed, skipping", guildId, queued.Track.Title);
                 }
             }
         }
@@ -305,9 +319,10 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
         }
     }
 
-    private async Task PlayTrackAsync(TrackInfo track, CancellationToken ct)
+    private async Task PlayTrackAsync(QueuedTrack queued, CancellationToken ct)
     {
-        var file = await downloader.DownloadAudioAsync(track, ct);
+        var track = queued.Track;
+        var file = await queued.Download.WaitAsync(ct);
 
         var audioClient = _audioClient
                           ?? throw new InvalidOperationException("Not connected to a voice channel.");
@@ -345,6 +360,27 @@ internal sealed class GuildPlayer(ulong guildId, YoutubeDownloader downloader, T
             }
         }
     }
+
+    /// <summary>
+    /// Empties the queue, detaching the prefetch downloads: they finish into the cache on their
+    /// own, they just must not fail unobserved. Callers hold <see cref="_sync"/>.
+    /// </summary>
+    private int DrainQueueLocked()
+    {
+        var removed = _queue.Count;
+
+        while (_queue.TryDequeue(out var queued))
+            Observe(queued.Download);
+
+        return removed;
+    }
+
+    /// <summary>Swallows the eventual failure of a task nobody awaits anymore.</summary>
+    private static void Observe(Task task) =>
+        _ = task.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+
+    /// <summary>A queued track plus the download that started the moment it was enqueued.</summary>
+    private sealed record QueuedTrack(TrackInfo Track, Task<string> Download);
 
     public async ValueTask DisposeAsync()
     {
