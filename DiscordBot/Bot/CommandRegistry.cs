@@ -69,7 +69,7 @@ public sealed class CommandRegistry
         if (!_commands.TryGetValue(interaction.Data.Name, out var command))
         {
             _logger.LogWarning("Received unknown command /{Command}", interaction.Data.Name);
-            await context.ErrorAsync("Unknown command.");
+            await TryReplyAsync(context, "Unknown command.", interaction.Data.Name);
             return;
         }
 
@@ -80,7 +80,25 @@ public sealed class CommandRegistry
         catch (Exception ex)
         {
             _logger.LogError(ex, "Command /{Command} failed", interaction.Data.Name);
-            await context.ErrorAsync("Something went wrong while running that command.");
+            await TryReplyAsync(context, "Something went wrong while running that command.", interaction.Data.Name);
+        }
+    }
+
+    /// <summary>
+    /// Sends a failure message without ever throwing. Replying can fail for the same reason the
+    /// command did - an interaction that already ran out of Discord's three second window rejects
+    /// the error message too - and nobody awaits <see cref="ExecuteAsync"/>, so an exception here
+    /// would be lost instead of logged.
+    /// </summary>
+    private async Task TryReplyAsync(CommandContext context, string message, string commandName)
+    {
+        try
+        {
+            await context.ErrorAsync(message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not reply to /{Command}", commandName);
         }
     }
 }
