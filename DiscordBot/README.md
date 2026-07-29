@@ -10,9 +10,10 @@ It plays audio from YouTube links in a voice channel: the link is downloaded wit
 |---|---|
 | `/play <link>` | Play a YouTube link. If something is already playing, the track is added to the queue. |
 | `/pause` | Pause the current track; run it again to resume. |
+| `/next` | Skip the current track and play the next one. The last track is never skipped. |
 | `/stop` | Stop playback, clear the queue and leave the voice channel. |
 
-Rules: you must be in a voice channel to use a command, and in the *same* channel as the bot when it is already playing somewhere.
+Rules: you must be in a voice channel to use a command, and in the *same* channel as the bot when it is already playing somewhere. `/pause`, `/next` and `/stop` reply that nothing is playing when the bot is idle.
 
 ## Requirements
 

@@ -29,6 +29,7 @@ internal sealed class GuildPlayer(
     private string? _pendingIntro;
     private CancellationTokenSource? _idleCts;
     private CancellationTokenSource? _playbackCts;
+    private CancellationTokenSource? _skipCts;
     private Task _playbackLoop = Task.CompletedTask;
     private bool _loopRunning;
 
@@ -120,6 +121,28 @@ internal sealed class GuildPlayer(
             }
 
             return IsPaused;
+        }
+        finally
+        {
+            _sync.Release();
+        }
+    }
+
+    /// <summary>
+    /// Cuts the current track short so the playback loop moves on to the next one. The last track
+    /// is deliberately left alone: /next is not a second /stop.
+    /// </summary>
+    /// <returns>The track that takes over, or <c>null</c> when there was nothing queued behind.</returns>
+    public async Task<TrackInfo?> SkipAsync()
+    {
+        await _sync.WaitAsync();
+        try
+        {
+            if (!_queue.TryPeek(out var next))
+                return null;
+
+            _skipCts?.Cancel();
+            return next.Track;
         }
         finally
         {
@@ -281,6 +304,7 @@ internal sealed class GuildPlayer(
             while (!ct.IsCancellationRequested)
             {
                 QueuedTrack? queued;
+                CancellationTokenSource skipCts;
 
                 await _sync.WaitAsync(ct);
                 try
@@ -298,6 +322,11 @@ internal sealed class GuildPlayer(
                     }
 
                     CurrentTrack = queued.Track;
+
+                    // Published under the lock so /next can only ever cancel the track that is
+                    // actually playing, never one that just finished on its own.
+                    skipCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    _skipCts = skipCts;
                 }
                 finally
                 {
@@ -306,7 +335,13 @@ internal sealed class GuildPlayer(
 
                 try
                 {
-                    await PlayTrackAsync(queued, ct);
+                    await PlayTrackAsync(queued, skipCts.Token);
+                }
+                catch (OperationCanceledException) when (skipCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    // Only this track was cancelled: /next asked for the one behind it. A stop
+                    // cancels the loop token too and still falls through to the rethrow below.
+                    logger.LogInformation("Guild {GuildId}: skipped '{Title}'", guildId, queued.Track.Title);
                 }
                 catch (OperationCanceledException)
                 {
@@ -315,6 +350,14 @@ internal sealed class GuildPlayer(
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "Guild {GuildId}: playback of '{Title}' failed, skipping", guildId, queued.Track.Title);
+                }
+                finally
+                {
+                    await _sync.WaitAsync(CancellationToken.None);
+                    _skipCts = null;
+                    _sync.Release();
+
+                    skipCts.Dispose();
                 }
             }
         }

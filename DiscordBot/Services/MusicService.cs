@@ -72,6 +72,30 @@ public sealed class MusicService(
             : new PauseResult.Resumed(track);
     }
 
+    /// <summary>
+    /// Skips to the next queued track. The last track is left playing: there is nothing to move on
+    /// to, and silently stopping it would make /next a surprising /stop.
+    /// </summary>
+    public async Task<SkipResult> SkipAsync(SocketGuildUser user)
+    {
+        if (!TryResolveVoiceChannel(user, out _, out var denial))
+        {
+            return denial == VoiceDenial.NotInVoice
+                ? new SkipResult.NotInVoice()
+                : new SkipResult.WrongChannel();
+        }
+
+        var player = FindPlayer(user.Guild.Id);
+        if (player is null || player.CurrentTrack is not { } current)
+            return new SkipResult.NothingPlaying();
+
+        var next = await player.SkipAsync();
+
+        return next is null
+            ? new SkipResult.LastTrack(current)
+            : new SkipResult.Skipped(current, next, player.IsPaused);
+    }
+
     /// <summary>Clears the queue, stops playback and leaves the voice channel.</summary>
     public async Task<StopResult> StopAsync(SocketGuildUser user)
     {

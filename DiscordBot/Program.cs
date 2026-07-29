@@ -47,6 +47,7 @@ builder.Services.AddSingleton<MusicService>();
 // Slash commands: add a file under Commands/ and one line here.
 builder.Services.AddSingleton<ISlashCommand, PlayCommand>();
 builder.Services.AddSingleton<ISlashCommand, PauseCommand>();
+builder.Services.AddSingleton<ISlashCommand, NextCommand>();
 builder.Services.AddSingleton<ISlashCommand, StopCommand>();
 builder.Services.AddSingleton<ISlashCommand, ListCommand>();
 builder.Services.AddSingleton<ISlashCommand, ClearCommand>();
